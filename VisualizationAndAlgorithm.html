@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang = "en">
+    <head>
+        <meta charset = "UTF-8">
+        <title>IA Programm Manhattan vs Euclidean</title> 
+        <style>
+            * {margin: 0; padding: 0; box-sizing: border-box;}
+            body {background: #0a0e1a; overflow: hidden; font-family: monospace; font-size: 11px; color: #aaa;}
+            canvas {display: block;}
+            #panel {position: absolute; bottom: 16px; right: 16px; text-align: right;}
+            #readout {margin-bottom: 8px; line-height: 1.8; }
+            .red {color: #ff6b6b;}
+            .teal {color: #4ecdc4;}
+            .yellow {color: #ffd080;}
+            #btns {display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; max-width: 320px;}
+            button {
+                padding: 4px 8px;
+                background: #141c2e;
+                border: 1px solid #2a3a5a;
+                color: #8099bb;
+                cursor: pointer;
+                font-family: monospace;
+                font-size: 11px;
+
+            }
+            button.active {border-color: #7ab3ff; color: #7ab3ff;}
+            input[type=range] {width: 120px; vertical-align: middle;}
+            #warn {color: #ff6b6b; display: none;}
+        </style>
+    </head>
+    <body>
+        <div id = "panel">
+            <div id = "readout">
+                <span class = "red">Manhattan</span> <span id = "manhattanCost">--</span> &nbsp; <span id = "manhattanSteps">--</span><br>
+                <span class = "teal">Euclidean</span> &nbsp;<span id = "euclideanCost">--</span> &nbsp; <span id = "euclideanSteps">--</span><br>
+                <span class = "yellow">Ratio</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span id = "ratioOut">--</span><br>
+                Buildings: <span id = "numberBuildings">--</span>
+                <span id = "warning">&nbsp; no path!</span>
+            </div>
+           <div id = "btns">
+                <button class = "active" onclick= "switchGridSize('smallest')">10x10x10</button>
+                <button onclick = "switchGridSize('small')">20x20x10</button>
+                <button onclick = "switchGridSize('medium')">30x30x30</button>
+                <button onclick = "switchGridSize('large')">40x40x40</button>
+                <button onclick = "switchGridSize('largest')">50x50x50</button>
+                <button onclick = "toggleEuclidean()" id="toggleEuclidean">hide teal</button>
+                <button onclick = "newSeed()">randomize</button>
+                <input type = "range" id = "densSlider" min = "0" max = "100" value = "20" oninput = "sliderChanged(this.value)">
+                <button onclick = "setDens(20)">20%</button>
+                <button onclick = "setDens(40)">40%</button>
+                <button onclick = "setDens(65)">60%</button>
+                <button onclick = "setDens(85)">80%</button>
+                <button onclick = "setDens(100)">100%</button>
+           </div> 
+        </div>
+        <!--source of 3d stuff-->
+        <script src = "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+        <script>
+            //cities sizes
+            var citySizes = {
+                smallest: {X: 10, Y: 10, Z: 10}, 
+                small: {X: 20, Y: 20, Z: 20},
+                medium: {X: 30, Y: 30, Z: 30},
+                large: {X: 40, Y: 40, Z: 40},
+                largest: {X: 50, Y: 50, Z: 50}
+            };
+            //starting values
+            var activeCity = 'smallest';
+            var buildingDensity = 20;
+            var randSeed = 67;
+            var showManhattan = true;
+            var showEuclidean = true;
+
+            //seeded based random values
+            function seededRandom(seedVal){
+                var s = seedVal;
+                return function(){
+                    s = (s * 1664525 + 1013904223) & 0xffffffff;
+                    return (s >>> 0) / 0xffffffff;
+                };
+            }
+
+            //this code places buildings randomly on the grid
+            //makes sure that start and end arent blocked
+            function placeBuildings(cityDimensions, densityPercent, rng){
+                var X = cityDimensions.X, Y = cityDimensions.Y, Z = cityDimensions.Z;
+                var placeAmount = Math.floor((X - 2) * (Y - 2) * densityPercent / 100);
+                var blockedVertices = new Set();
+                var buildingsList = [];
+
+                for(var i = 0; i < placeAmount; i++){
+                    var column = Math.floor(rng() * X);
+                    var row = Math.floor(rng() * Y);
+                    //max building height so that the pathfinding algorithm won't be stuck
+                    var floorCount = 1 + Math.floor(rng() * (Z - 1));
+                    //add building floors as blocked vertices
+                    for(var floor = 0; floor <= floorCount; floor++){
+                        blockedVertices.add(column + ',' + row + ',' + floor);
+                    }
+                    buildingsList.push({x: column, y: row, height: floorCount});
+                }
+
+                //make sure end and start arent blocked by removing that building
+                for (var sz = 0; sz < Z; sz++) 
+                    blockedVertices.delete('0,0,' + sz);
+                for (var ez = 0; ez < Z; ez++) 
+                    blockedVertices.delete((X - 1) + ',' + (Y - 1) + ',' + ez);
+
+
+                return {blockedVertices: blockedVertices, buildingsList: buildingsList};
+            }
+            //code to run dijksta, but with the restriction of both types of distances
+            function dijkstaAlgorithm(cityDimensions, blockedVertices, distanceType){
+                var X = cityDimensions.X, Y = cityDimensions.Y, Z = cityDimensions.Z;
+                var startVertex = '0,0,0';
+                var endVertex = (X - 1) + ',' + (Y - 1) + ',' + (Z - 1);
+                var cameFrom = {};
+                //create diffent movement options for both distance things
+                var moveOptions = [];
+                if (distanceType === 'manhattan') {
+                //axis-aligned moves for manhattan
+                moveOptions = [
+                    [1,0,0], [-1,0,0],
+                    [0,1,0], [0,-1,0],
+                    [0,0,1], [0,0,-1]
+                ];
+                } else {
+                    // all 26 neighbours for euclidean diagonal movement
+                    for(var distanceX = -1; distanceX <= 1; distanceX++) {
+                        for(var distanceY = -1; distanceY <= 1; distanceY++) {
+                            for(var distanceZ = -1; distanceZ <= 1; distanceZ++) {
+                                if(distanceX !== 0 || distanceY !== 0 || distanceZ !== 0)
+                                    moveOptions.push([distanceX, distanceY, distanceZ]);
+                            }
+                        }
+                    }
+                }
+
+                    var shortestDist = {};
+                    var previousPos = {};
+                    var visitedSet = new Set();
+                    //greeed based queue to choose most immediately benefiting move
+                    shortestDist[startVertex] = 0;
+                    cameFrom[startVertex] = null;
+                    var queue = [[0, startVertex]];
+
+                    while (queue.length > 0){
+                        //sort queue tto find vertices with the lowest cost
+                        queue.sort(function(a, b) {
+                            return a[0] - b[0];
+                        });
+                        var current = queue.shift();
+                        var costSoFar = current[0];
+                        var currentVertex = current[1];
+
+                        if(visitedSet.has(currentVertex)) 
+                            continue;
+                        visitedSet.add(currentVertex);
+
+                        if(currentVertex === endVertex)
+                            break;
+
+                        var coords = currentVertex.split(',');
+                        var currentX = parseInt(coords[0]);
+                        var currentY = parseInt(coords[1]);
+                        var currentZ = parseInt(coords[2]);
+
+                        for (var m = 0; m < moveOptions.length; m++) {
+                            var move = moveOptions[m];
+                            var neighbourX = currentX + move[0];
+                            var neighbourY = currentY + move[1];
+                            var neighbourZ = currentZ + move[2];
+                             //break if the vertex targetted is out of bounds
+                             if(neighbourX < 0 || neighbourX >= X || neighbourY < 0 || neighbourY >= Y || neighbourZ < 0 || neighbourZ >= Z)
+                                continue;
+                           
+                             //skip any coordinates that are out of the boundary
+                            var nextVertex = neighbourX + ',' + neighbourY + ',' + neighbourZ;
+                            if(blockedVertices.has(nextVertex) || visitedSet.has(nextVertex))
+                                continue;
+                            var edgeCost;
+                            if (distanceType === 'manhattan') {
+                                edgeCost = Math.abs(move[0]) + Math.abs(move[1]) + Math.abs(move[2]);
+                            } else {
+                                edgeCost = Math.sqrt(move[0]*move[0] + move[1]*move[1] + move[2]*move[2]);
+                            }
+
+                            var newCost = costSoFar + edgeCost;
+                            if (shortestDist[nextVertex] === undefined || newCost < shortestDist[nextVertex]) {
+                                shortestDist[nextVertex] = newCost;
+                                cameFrom[nextVertex] = currentVertex;
+                                queue.push([newCost, nextVertex]);
+                            }  
+                        }
+                    
+                    }
+
+                    if(shortestDist[endVertex] === undefined)
+                        return {path: null, totalCost: 0, vertexCount: 0};
+
+                    var fullPath = [];
+                    var tracedPath = endVertex;
+                    while(tracedPath !== null && tracedPath !== undefined){
+                        fullPath.push(tracedPath.split(',').map(Number));
+                        tracedPath = cameFrom[tracedPath];
+                    }
+                    fullPath.reverse();
+
+                    return{
+                        path: fullPath,
+                        totalCost: Math.round(shortestDist[endVertex] * 10000) / 10000,
+                        vertexCount: fullPath.length - 1
+                    };
+                }
+                //make scene with three.js
+                var scene = new THREE.Scene();
+                scene.background = new THREE.Color(0x0a0e1a);
+
+                var renderer = new THREE.WebGLRenderer({ antialias: true });
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                document.body.prepend(renderer.domElement);
+
+                var cam = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+                //camera variables stuff
+                var dragging = false;
+                var prevMouseX = 0, prevMouseY = 0;
+                var orbitTheta = Math.PI / 4;
+                var orbitPhi = Math.PI / 3;
+                var orbitDist = 20;
+                var lookAtPoint = new THREE.Vector3();
+
+                renderer.domElement.addEventListener('mousedown', function(e) {
+                    dragging = true;
+                    prevMouseX = e.clientX;
+                    prevMouseY = e.clientY;
+                });
+
+                renderer.domElement.addEventListener('mouseup', function() {
+                    dragging = false;
+                });
+
+                renderer.domElement.addEventListener('mousemove', function(e) {
+                    if (!dragging) return;
+                    orbitTheta -= (e.clientX - prevMouseX) * 0.01;
+                    orbitPhi = Math.max(0.2, Math.min(Math.PI / 2, orbitPhi - (e.clientY - prevMouseY) * 0.01));
+                    prevMouseX = e.clientX;
+                    prevMouseY = e.clientY;
+                    repositionCamera();
+                });
+
+                renderer.domElement.addEventListener('wheel', function(e) {
+                    orbitDist = Math.max(5, Math.min(120, orbitDist + e.deltaY * 0.05));
+                    repositionCamera();
+                });
+
+                function repositionCamera() {
+                    cam.position.set(
+                    lookAtPoint.x + orbitDist * Math.sin(orbitPhi) * Math.sin(orbitTheta),
+                    lookAtPoint.y + orbitDist * Math.cos(orbitPhi),
+                    lookAtPoint.z + orbitDist * Math.sin(orbitPhi) * Math.cos(orbitTheta)
+                    );
+                    cam.lookAt(lookAtPoint);
+                }
+
+                scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+                var sun = new THREE.DirectionalLight(0xffffff, 0.6);
+                sun.position.set(10, 20, 10);
+                scene.add(sun);
+
+                var thingsInScene = [];
+
+                function clearEverything() {
+                    for (var i = 0; i < thingsInScene.length; i++) {
+                    scene.remove(thingsInScene[i]);
+                    }
+                    thingsInScene = [];
+                }
+
+                function addToScene(obj) {
+                    scene.add(obj);
+                    thingsInScene.push(obj);
+                }
+                function redraw() {
+                    clearEverything();
+
+                    var dims = citySizes[activeCity];
+                    var X = dims.X, Y = dims.Y, Z = dims.Z;
+
+                    var rng = seededRandom(randSeed);
+                    var cityData = placeBuildings(dims, buildingDensity, rng);
+                    var blocked = cityData.blockedVertices;
+                    var buildings = cityData.buildingsList;
+
+                    // center camera
+                    lookAtPoint.set((X-1)/2, (Z-1)/2, (Y-1)/2);
+                    orbitDist = Math.max(X, Y, Z) * 1.8;
+                    repositionCamera();
+
+                    // grid lines
+                    var floorGrid = new THREE.GridHelper(Math.max(X, Y), Math.max(X, Y), 0x1a2a40, 0x1a2a40);
+                    floorGrid.position.set((X-1)/2, -0.5, (Y-1)/2);
+                    addToScene(floorGrid);
+
+                    // draw each building as a box
+                    var cityMat = new THREE.MeshLambertMaterial({ color: 0x2a4070, transparent: true, opacity: 0.8 });
+                    for (var b = 0; b < buildings.length; b++) {
+                    var bld = buildings[b];
+                    var bHeight = bld.height + 1;
+                    var box = new THREE.Mesh(new THREE.BoxGeometry(0.9, bHeight, 0.9), cityMat);
+                    box.position.set(bld.x, (bHeight / 2) - 0.5, bld.y);
+                    addToScene(box);
+                    }
+
+                    // run dijkstra algorithm for both distance types
+                    var mResult = dijkstaAlgorithm(dims, blocked, 'manhattan');
+                    var eResult = dijkstaAlgorithm(dims, blocked, 'euclidean');
+
+                    var pathsMissing = !mResult.path || !eResult.path;
+                    document.getElementById('warning').style.display = pathsMissing ? 'inline' : 'none';
+
+                    // draw the path as a line + small dots at each visited vertex
+                function drawPathLine(result, lineColor, heightOffset) {
+                    if (!result.path || result.path.length < 2) return;
+                    var pts = [];
+                    for (var n = 0; n < result.path.length; n++) {
+                        var vertex = result.path[n];
+                        pts.push(new THREE.Vector3(vertex[0], vertex[2] + heightOffset, vertex[1]));
+                    }
+
+                    var pathLine = new THREE.Line(
+                        new THREE.BufferGeometry().setFromPoints(pts),
+                        new THREE.LineBasicMaterial({ color: lineColor })
+                    );
+                    addToScene(pathLine);
+
+                    // small sphere at each vertex so we can see where it steps
+                    var dotShape = new THREE.SphereGeometry(0.1, 6, 6);
+                    var dotColor = new THREE.MeshLambertMaterial({ color: lineColor });
+                    for (var p = 0; p < pts.length; p++) {
+                        var dot = new THREE.Mesh(dotShape, dotColor);
+                        dot.position.copy(pts[p]);
+                        addToScene(dot);
+                    }
+                }
+
+                    if (showManhattan) drawPathLine(mResult, 0xff6b6b, 0.05);
+                    if (showEuclidean) drawPathLine(eResult, 0x4ecdc4, -0.05);
+
+                    // yellow spheres mark where the path starts and ends
+                    var markerMat = new THREE.MeshLambertMaterial({ color: 0xffd080 });
+                    var markerShape = new THREE.SphereGeometry(0.3, 10, 10);
+                    var startMarker = new THREE.Mesh(markerShape, markerMat);
+                    startMarker.position.set(0, 0, 0);
+                    addToScene(startMarker);
+                    var endMarker = new THREE.Mesh(markerShape, markerMat);
+                    endMarker.position.set(X-1, Z-1, Y-1);
+                    addToScene(endMarker);
+
+                    // update the stats panel
+                    var ratio = '--';
+                    if (!pathsMissing && mResult.totalCost > 0) {
+                    ratio = Math.round(eResult.totalCost / mResult.totalCost * 10000) / 10000;
+                    }
+
+                    document.getElementById('manhattanCost').textContent = mResult.path ? mResult.totalCost : 'blocked';
+                    document.getElementById('manhattanSteps').textContent = mResult.path ? mResult.vertexCount + ' steps' : '';
+                    document.getElementById('euclideanCost').textContent = eResult.path ? eResult.totalCost : 'blocked';
+                    document.getElementById('euclideanSteps').textContent = eResult.path ? eResult.vertexCount + ' steps' : '';
+                    document.getElementById('ratioOut').textContent = ratio;
+                    document.getElementById('numberBuildings').textContent = buildings.length;
+                }
+
+                function switchGridSize(name) {
+                    var allBtns = document.querySelectorAll('#btns button');
+                    var gridNames = ['smallest', 'small', 'medium', 'large', 'largest'];
+                    for (var i = 0; i < 5; i++)
+                        allBtns[i].classList.toggle('active', gridNames[i] === name);
+                    activeCity = name;
+                    redraw();
+                }
+
+                function setDens(val) {
+                    buildingDensity = val;
+                    document.getElementById('densSlider').value = val;
+                    redraw();
+                }
+
+                function sliderChanged(val) {
+                    buildingDensity = parseInt(val);
+                    redraw();
+                }
+
+                function toggleManhattan() {
+                    showManhattan = !showManhattan;
+                    document.getElementById('toggleManhattan').textContent = showManhattan ? 'hide red' : 'show red';
+                    redraw();
+                }
+
+                function toggleEuclidean() {
+                    showEuclidean = !showEuclidean;
+                    document.getElementById('toggleEuclidean').textContent = showEuclidean ? 'hide teal' : 'show teal';
+                    redraw();
+                }
+
+                function newSeed() {
+                    randSeed = Math.floor(Math.random() * 100000);
+                    redraw();
+                }
+
+                window.addEventListener('resize', function() {
+                    cam.aspect = window.innerWidth / window.innerHeight;
+                    cam.updateProjectionMatrix();
+                    renderer.setSize(window.innerWidth, window.innerHeight);
+                });
+
+                function loop() {
+                    requestAnimationFrame(loop);
+                    renderer.render(scene, cam);
+                }
+
+                redraw();
+                loop();
+        </script>
+    </body>
+</html>
